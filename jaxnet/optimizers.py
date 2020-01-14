@@ -3,7 +3,7 @@ from collections import namedtuple
 from functools import lru_cache
 
 import jax
-from jax import grad, value_and_grad, tree_map, tree_multimap, partial
+from jax import grad, value_and_grad, tree_map, tree_multimap, partial, np
 from jax.experimental import optimizers as experimental
 # noinspection PyUnresolvedReferences
 from jax.experimental.optimizers import constant, exponential_decay, inverse_time_decay, \
@@ -45,29 +45,45 @@ class Optimizer(ABC):
         step, _ = state
         return step
 
-    def update(self, loss_fun, state, *inputs, jit=False, **kwargs):
-        return self._update(loss_fun, state, *inputs, jit=jit, **kwargs)
+    def update(self, loss_fun, state, *inputs, jit=False, pmap=False, **kwargs):
+        return self._update(loss_fun, state, *inputs, jit=jit, pmap=pmap, **kwargs)
 
-    def update_and_get_loss(self, loss_fun, state, *inputs, jit=False, **kwargs):
-        return self._update(loss_fun, state, *inputs, **kwargs, jit=jit, return_loss=True)
+    def update_and_get_loss(self, loss_fun, state, *inputs, jit=False, pmap=False, **kwargs):
+        return self._update(loss_fun, state, *inputs, **kwargs, jit=jit, pmap=pmap, return_loss=True)
 
-    def _update(self, loss_fun, state, *inputs, jit=False, return_loss=False, **kwargs):
-        inner = self._update_fun(loss_fun, return_loss=return_loss)
+    def _update(self, loss_fun, state, *inputs, jit=False, pmap=False, return_loss=False, **kwargs):
+        inner = self._update_fun(loss_fun, return_loss=return_loss, pmap=pmap)
         return (jax.jit(inner) if jit else inner)(state, *inputs, **kwargs)
 
     # To avoid recompilation on every call:
     @lru_cache()
-    def _update_fun(self, loss_fun, return_loss=False):
+    def _update_fun(self, loss_fun, return_loss=False, pmap=False):
         def update(state, *inputs, **kwargs):
             params = self.get_parameters(state)
             if return_loss:
+                if pmap:
+                    loss, gradient = jax.pmap(partial(value_and_grad(loss_fun), params, **kwargs))(*inputs)
+                    acc_shard_fun = kwargs['acc_shard_fun'] if 'acc_shard_fun' in kwargs else partial(np.mean, axis=0)
+                    gradient = self._accumulate_sharded_tree(gradient, acc_shard_fun)
+                    return self.update_from_gradients(gradient, state), acc_shard_fun(loss)
                 loss, gradient = value_and_grad(loss_fun)(params, *inputs, **kwargs)
                 return self.update_from_gradients(gradient, state), loss
             else:
+                if pmap:
+                    gradient = jax.pmap(partial(grad(loss_fun), params, **kwargs))(*inputs)
+                    acc_shard_fun = kwargs['acc_shard_fun'] if 'acc_shard_fun' in kwargs else partial(np.mean, axis=0)
+                    gradient = self._accumulate_sharded_tree(gradient, acc_shard_fun)
+                    return self.update_from_gradients(gradient, state)
                 gradient = grad(loss_fun)(params, *inputs, **kwargs)
                 return self.update_from_gradients(gradient, state)
 
         return update
+
+    @staticmethod
+    def _accumulate_sharded_tree(tree, acc_fun):
+        flat, tree_def = jax.tree_flatten(tree)
+        flat = [acc_fun(x) for x in flat]
+        return jax.tree_unflatten(tree_def, flat)
 
     @abstractmethod
     def _init_for_parameter(self, parameter):

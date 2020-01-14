@@ -131,8 +131,11 @@ class parametrized(Primitive):
             del master
         return tree_unflatten(out_tree(), flat_outputs)
 
-    def apply(self, parameters, *inputs, key=no_key, jit=False):
-        return (self._jitted_apply if jit else self._apply)(parameters, *inputs, key=key)
+    def apply(self, parameters, *inputs, key=no_key, jit=False, pmap=False):
+        apply_fun = self._jitted_apply if jit else self._apply
+        if pmap:
+            return jax.pmap(partial(apply_fun, parameters, key=key))(*inputs)
+        return apply_fun(parameters, *inputs, key=key)
 
     def apply_from(self, reuse, *example_inputs, key=no_key, jit=False):
         parameters = self.parameters_from(reuse, *example_inputs)
