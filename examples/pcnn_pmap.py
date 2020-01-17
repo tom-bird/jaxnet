@@ -322,6 +322,7 @@ def main(batch_size=4 * n_devices, nr_filters=2, epochs=10, step_size=1e-3,
 
             train_loss, state = update_fun(replicate_array(np.array(step)), state,
                                            reshape_batch(batch), key=replicate_array(key))
+            train_loss = train_loss[0]
             step += 1
             if step % 100 == 0 or step < 10:
                 key, test_key = random.split(key)
